@@ -1,0 +1,29 @@
+using UnityEngine;
+
+public class SimpleMovement : MonoBehaviour
+{
+    public float moveSpeed = 5f;
+    public float jumpForce = 10f;
+    private Rigidbody rb;
+
+    
+    void Start()
+    {
+        rb = GetComponent<Rigidbody>();
+    }
+
+
+    void Update()
+    {
+        float horizontal = Input.GetAxis("Horizontal");
+        float vertical = Input.GetAxis("Vertical");
+        
+        Vector3 direction = new Vector3(horizontal, 0f, vertical);
+        transform.Translate(direction * moveSpeed * Time.deltaTime);
+
+         if (Input.GetKeyDown(KeyCode.Space))
+         {
+            rb.AddForce(Vector3.up * jumpForce, ForceMode.Impulse);
+         }
+    }
+}   
