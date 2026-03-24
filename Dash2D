@@ -1,0 +1,263 @@
+using System.Collections;
+using UnityEngine;
+
+/// <summary>
+/// 2D Dash Controller
+/// Attach this to a GameObject with a Rigidbody2D.
+/// All public fields are tunable from the Unity Inspector.
+/// </summary>
+[RequireComponent(typeof(Rigidbody2D))]
+public class DashController2D : MonoBehaviour
+{
+    [Header("Dash Settings")]
+    [Tooltip("How far the player dashes in world units.")]
+    public float dashDistance = 6f;
+
+    [Tooltip("How fast the dash travels (units per second).")]
+    public float dashSpeed = 25f;
+
+    [Tooltip("Cooldown in seconds before the player can dash again.")]
+    public float dashCooldown = 1f;
+
+    [Tooltip("Number of dashes available before needing to recharge.")]
+    public int maxDashCharges = 2;
+
+    [Tooltip("Time in seconds to regain one dash charge.")]
+    public float chargeRechargeTime = 1.5f;
+
+    [Header("Dash Direction")]
+    [Tooltip("Allow 8-directional dashes using movement input.")]
+    public bool dashInMoveDirection = true;
+
+    [Tooltip("Allow vertical dashing (up/down). Disable for pure horizontal games.")]
+    public bool allowVerticalDash = true;
+
+    [Tooltip("If no input is held, dash in the last faced direction.")]
+    public bool fallbackToLastFacingDir = true;
+
+    [Header("Dash Feel")]
+    [Tooltip("Freeze gravity scale to 0 during the dash so the player doesn't arc.")]
+    public bool freezeGravityDuringDash = true;
+
+    [Tooltip("Set Rigidbody2D velocity to zero before applying dash force (cleaner start).")]
+    public bool zeroVelocityOnDash = true;
+
+    [Tooltip("Allow dashing while in the air.")]
+    public bool canDashInAir = true;
+
+    [Tooltip("Layer mask for ground detection (used when canDashInAir is false).")]
+    public LayerMask groundLayer;
+
+    [Tooltip("Radius of the ground check circle.")]
+    public float groundCheckRadius = 0.1f;
+
+    [Tooltip("Point used for ground overlap check. Assign a child Transform at feet.")]
+    public Transform groundCheckPoint;
+
+    [Header("Collision")]
+    [Tooltip("Stop the dash early if the player hits a wall.")]
+    public bool stopOnWallHit = true;
+
+    [Tooltip("Layer mask for wall detection.")]
+    public LayerMask wallLayer = ~0;
+
+    [Header("Input")]
+    [Tooltip("KeyCode to trigger the dash.")]
+    public KeyCode dashKey = KeyCode.LeftShift;
+
+    // ── Internal state ──────────────────────────────────────────────────────
+    private Rigidbody2D _rb;
+    private int   _currentCharges;
+    private float _cooldownTimer;
+    private float _rechargeTimer;
+    private bool  _isDashing;
+    private Vector2 _dashDirection;
+    private float _dashTraveled;
+    private Vector2 _dashStartPos;
+    private float _originalGravityScale;
+
+    // Track last horizontal facing for fallback direction
+    private Vector2 _lastFacingDirection = Vector2.right;
+
+    // Read-only state for UI / animations
+    public bool  IsDashing        => _isDashing;
+    public int   CurrentCharges   => _currentCharges;
+    public float CooldownProgress => Mathf.Clamp01(_cooldownTimer / dashCooldown);
+
+    // ── Lifecycle ────────────────────────────────────────────────────────────
+    private void Awake()
+    {
+        _rb                  = GetComponent<Rigidbody2D>();
+        _currentCharges      = maxDashCharges;
+        _originalGravityScale = _rb.gravityScale;
+    }
+
+    private void Update()
+    {
+        TrackFacingDirection();
+        HandleCooldown();
+        HandleRecharge();
+
+        if (!_isDashing && Input.GetKeyDown(dashKey) && _currentCharges > 0 && _cooldownTimer <= 0f)
+        {
+            if (canDashInAir || IsGrounded())
+                StartDash();
+        }
+    }
+
+    private void FixedUpdate()
+    {
+        if (_isDashing)
+            PerformDashStep();
+    }
+
+    // ── Dash Logic ───────────────────────────────────────────────────────────
+    private void StartDash()
+    {
+        _dashDirection = GetDashDirection();
+
+        if (_dashDirection == Vector2.zero)
+            return;
+
+        _currentCharges--;
+        _cooldownTimer = dashCooldown;
+        _isDashing     = true;
+        _dashTraveled  = 0f;
+        _dashStartPos  = _rb.position;
+
+        if (zeroVelocityOnDash)
+            _rb.linearVelocity = Vector2.zero;
+
+        if (freezeGravityDuringDash)
+            _rb.gravityScale = 0f;
+
+        OnDashStart();
+    }
+
+    private void PerformDashStep()
+    {
+        float stepDistance = dashSpeed * Time.fixedDeltaTime;
+        float remaining    = dashDistance - _dashTraveled;
+        float move         = Mathf.Min(stepDistance, remaining);
+
+        // Wall collision check
+        if (stopOnWallHit)
+        {
+            RaycastHit2D hit = Physics2D.Raycast(_rb.position, _dashDirection, move + 0.05f, wallLayer);
+            if (hit.collider != null && !hit.collider.isTrigger)
+            {
+                _rb.MovePosition(hit.point - _dashDirection * 0.05f);
+                EndDash();
+                return;
+            }
+        }
+
+        _rb.MovePosition(_rb.position + _dashDirection * move);
+        _dashTraveled += move;
+
+        if (_dashTraveled >= dashDistance)
+            EndDash();
+    }
+
+    private void EndDash()
+    {
+        _isDashing       = false;
+        _rb.gravityScale = _originalGravityScale;
+
+        // Cancel residual velocity so the player doesn't coast
+        _rb.linearVelocity = Vector2.zero;
+
+        OnDashEnd();
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+    private Vector2 GetDashDirection()
+    {
+        if (dashInMoveDirection)
+        {
+            float h = Input.GetAxisRaw("Horizontal");
+            float v = allowVerticalDash ? Input.GetAxisRaw("Vertical") : 0f;
+            Vector2 input = new Vector2(h, v).normalized;
+
+            if (input != Vector2.zero)
+                return input;
+        }
+
+        if (fallbackToLastFacingDir)
+            return _lastFacingDirection;
+
+        return Vector2.zero;
+    }
+
+    private void TrackFacingDirection()
+    {
+        float h = Input.GetAxisRaw("Horizontal");
+        float v = allowVerticalDash ? Input.GetAxisRaw("Vertical") : 0f;
+        Vector2 input = new Vector2(h, v);
+
+        if (input != Vector2.zero)
+            _lastFacingDirection = input.normalized;
+    }
+
+    private bool IsGrounded()
+    {
+        if (groundCheckPoint == null) return true; // fallback: assume grounded
+        return Physics2D.OverlapCircle(groundCheckPoint.position, groundCheckRadius, groundLayer);
+    }
+
+    private void HandleCooldown()
+    {
+        if (_cooldownTimer > 0f)
+            _cooldownTimer -= Time.deltaTime;
+        else
+            _cooldownTimer = 0f;
+    }
+
+    private void HandleRecharge()
+    {
+        if (_currentCharges < maxDashCharges)
+        {
+            _rechargeTimer += Time.deltaTime;
+            if (_rechargeTimer >= chargeRechargeTime)
+            {
+                _currentCharges++;
+                _rechargeTimer = 0f;
+            }
+        }
+        else
+        {
+            _rechargeTimer = 0f;
+        }
+    }
+
+    // ── Override hooks ───────────────────────────────────────────────────────
+    /// <summary>Called when dash begins. Hook in VFX, SFX, or animation triggers here.</summary>
+    protected virtual void OnDashStart()
+    {
+        Debug.Log($"[Dash2D] Dash started → direction: {_dashDirection}");
+    }
+
+    /// <summary>Called when dash ends.</summary>
+    protected virtual void OnDashEnd()
+    {
+        Debug.Log("[Dash2D] Dash ended.");
+    }
+
+#if UNITY_EDITOR
+    private void OnDrawGizmosSelected()
+    {
+        // Dash range preview
+        Gizmos.color = Color.cyan;
+        Vector2 dir = Application.isPlaying ? _dashDirection : Vector2.right;
+        Gizmos.DrawRay(transform.position, (Vector3)dir * dashDistance);
+        Gizmos.DrawWireSphere(transform.position + (Vector3)(dir * dashDistance), 0.15f);
+
+        // Ground check preview
+        if (groundCheckPoint != null)
+        {
+            Gizmos.color = Color.green;
+            Gizmos.DrawWireSphere(groundCheckPoint.position, groundCheckRadius);
+        }
+    }
+#endif
+}
