@@ -1,0 +1,213 @@
+using System.Collections;
+using UnityEngine;
+
+/// <summary>
+/// 3D Dash Controller
+/// Attach this to a GameObject with a CharacterController or Rigidbody.
+/// All public fields are tunable from the Unity Inspector.
+/// </summary>
+[RequireComponent(typeof(CharacterController))]
+public class DashController3D : MonoBehaviour
+{
+    [Header("Dash Settings")]
+    [Tooltip("How far the player dashes in world units.")]
+    public float dashDistance = 8f;
+
+    [Tooltip("How fast the dash travels (units per second).")]
+    public float dashSpeed = 30f;
+
+    [Tooltip("Cooldown in seconds before the player can dash again.")]
+    public float dashCooldown = 1.2f;
+
+    [Tooltip("Number of dashes available before needing to recharge.")]
+    public int maxDashCharges = 2;
+
+    [Tooltip("Time in seconds to regain one dash charge.")]
+    public float chargeRechargeTime = 2f;
+
+    [Header("Dash Direction")]
+    [Tooltip("If true, dash toward the movement input direction. If false, dash forward.")]
+    public bool dashInMoveDirection = true;
+
+    [Tooltip("If true and no movement input is held, dash in the facing direction.")]
+    public bool fallbackToFacingDirection = true;
+
+    [Header("Dash Feel")]
+    [Tooltip("Apply a slight upward boost during dash to avoid ground clipping.")]
+    public bool applyVerticalBoost = true;
+
+    [Tooltip("Vertical boost force applied at dash start.")]
+    public float verticalBoostForce = 2f;
+
+    [Tooltip("Ignore gravity during the dash.")]
+    public bool ignorGravityDuringDash = true;
+
+    [Tooltip("Layer mask used for collision detection during dash.")]
+    public LayerMask collisionMask = ~0;
+
+    [Header("Input")]
+    [Tooltip("KeyCode to trigger the dash.")]
+    public KeyCode dashKey = KeyCode.LeftShift;
+
+    // ── Internal state ──────────────────────────────────────────────────────
+    private CharacterController _cc;
+    private int   _currentCharges;
+    private float _cooldownTimer;
+    private float _rechargeTimer;
+    private bool  _isDashing;
+    private Vector3 _dashDirection;
+    private float _dashTraveled;
+
+    // Expose read-only state for UI/animation
+    public bool  IsDashing        => _isDashing;
+    public int   CurrentCharges   => _currentCharges;
+    public float CooldownProgress => Mathf.Clamp01(_cooldownTimer / dashCooldown);
+
+    // ── Lifecycle ────────────────────────────────────────────────────────────
+    private void Awake()
+    {
+        _cc             = GetComponent<CharacterController>();
+        _currentCharges = maxDashCharges;
+    }
+
+    private void Update()
+    {
+        HandleCooldown();
+        HandleRecharge();
+
+        if (!_isDashing && Input.GetKeyDown(dashKey) && _currentCharges > 0 && _cooldownTimer <= 0f)
+            StartDash();
+    }
+
+    private void FixedUpdate()
+    {
+        if (_isDashing)
+            PerformDashStep();
+    }
+
+    // ── Dash Logic ───────────────────────────────────────────────────────────
+    private void StartDash()
+    {
+        _dashDirection = GetDashDirection();
+
+        if (_dashDirection == Vector3.zero)
+            return; // No valid direction — abort
+
+        _currentCharges--;
+        _cooldownTimer  = dashCooldown;
+        _isDashing      = true;
+        _dashTraveled   = 0f;
+
+        OnDashStart();
+    }
+
+    private void PerformDashStep()
+    {
+        float stepDistance = dashSpeed * Time.fixedDeltaTime;
+        float remaining    = dashDistance - _dashTraveled;
+        float move         = Mathf.Min(stepDistance, remaining);
+
+        Vector3 motion = _dashDirection * move;
+
+        if (applyVerticalBoost && _dashTraveled == 0f)
+            motion.y += verticalBoostForce * Time.fixedDeltaTime;
+
+        if (ignorGravityDuringDash)
+            motion.y = Mathf.Max(motion.y, 0f); // cancel downward gravity during dash
+
+        // Obstacle check
+        if (Physics.Raycast(transform.position, _dashDirection, out RaycastHit hit, move + 0.1f, collisionMask))
+        {
+            // Hit a wall — stop dash early
+            _cc.Move(hit.point - transform.position);
+            EndDash();
+            return;
+        }
+
+        _cc.Move(motion);
+        _dashTraveled += move;
+
+        if (_dashTraveled >= dashDistance)
+            EndDash();
+    }
+
+    private void EndDash()
+    {
+        _isDashing = false;
+        OnDashEnd();
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+    private Vector3 GetDashDirection()
+    {
+        if (dashInMoveDirection)
+        {
+            float h = Input.GetAxisRaw("Horizontal");
+            float v = Input.GetAxisRaw("Vertical");
+            Vector3 input = new Vector3(h, 0f, v).normalized;
+
+            if (input != Vector3.zero)
+            {
+                // Convert input to world-space relative to camera
+                Transform cam = Camera.main ? Camera.main.transform : transform;
+                Vector3 forward = Vector3.ProjectOnPlane(cam.forward, Vector3.up).normalized;
+                Vector3 right   = Vector3.ProjectOnPlane(cam.right,   Vector3.up).normalized;
+                return (forward * input.z + right * input.x).normalized;
+            }
+        }
+
+        if (fallbackToFacingDirection)
+            return Vector3.ProjectOnPlane(transform.forward, Vector3.up).normalized;
+
+        return Vector3.zero;
+    }
+
+    private void HandleCooldown()
+    {
+        if (_cooldownTimer > 0f)
+            _cooldownTimer -= Time.deltaTime;
+        else
+            _cooldownTimer = 0f;
+    }
+
+    private void HandleRecharge()
+    {
+        if (_currentCharges < maxDashCharges)
+        {
+            _rechargeTimer += Time.deltaTime;
+            if (_rechargeTimer >= chargeRechargeTime)
+            {
+                _currentCharges++;
+                _rechargeTimer = 0f;
+            }
+        }
+        else
+        {
+            _rechargeTimer = 0f;
+        }
+    }
+
+    // ── Override hooks (great for VFX / SFX / animation triggers) ───────────
+    /// <summary>Called the moment a dash begins. Override or subscribe for effects.</summary>
+    protected virtual void OnDashStart()
+    {
+        Debug.Log($"[Dash3D] Dash started → direction: {_dashDirection}");
+    }
+
+    /// <summary>Called the moment a dash ends.</summary>
+    protected virtual void OnDashEnd()
+    {
+        Debug.Log("[Dash3D] Dash ended.");
+    }
+
+#if UNITY_EDITOR
+    // Draw dash range in Scene view for easy tuning
+    private void OnDrawGizmosSelected()
+    {
+        Gizmos.color = Color.cyan;
+        Vector3 dir = Application.isPlaying ? _dashDirection : transform.forward;
+        Gizmos.DrawRay(transform.position, dir * dashDistance);
+        Gizmos.DrawWireSphere(transform.position + dir * dashDistance, 0.2f);
+    }
+#endif
+}
